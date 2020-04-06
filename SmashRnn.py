@@ -29,21 +29,26 @@ class Embedder(nn.Module):
 
 
 class Pad():  #pads words as well as sentences
-    def __init__(self, input, sent_cnt, word_cnt, dim=1024):
-        self.input = input
+    def __init__(self, bs=2, sent_cnt=2, word_cnt=50, dim=1024):
+        sent_cnt += 1
         self.embed = Embedder()
-        self.zeros = torch.zeros((len(self.input), sent_cnt, word_cnt, dim))
+        self.zeros = torch.zeros((bs, sent_cnt, word_cnt, dim))
+        self.dummy = "<PAD> " * word_cnt
 
-    def pad(self):
-        paralen = [len(para) for para in self.input]
-        seqlen = [[len(line.split()) for line in para] for para in self.input]
+    def __call__(self, input):
+        for li in input:
+            li.append(self.dummy)
+        paralen = [len(para) for para in input]
+        seqlen = [[len(line.split()) for line in para] for para in input]
         self.embed = self.embed(input)
         for i in range(len(seqlen)):
             m = 0
             for k in seqlen[i]:
                 self.zeros[i][m][:k] = self.embed[i][m][:k]
                 m += 1
-        return self.zeros
+
+        alpha = self.zeros[:, :-1]
+        return alpha
 
 # INPUT FORMAT:
 # input = [["i won the match", "i lost it", "wdw fd india wins"],
@@ -53,89 +58,74 @@ class Pad():  #pads words as well as sentences
 # print(b)
 
 class WordEncoder(nn.Module):
-
-    def __init__(self, input_dim=1024, hidden_dim=1024, hidden_layers=2, output_dim=1024, keep_prob=0.2, X): #input_dim= input dim at each time step = emb_size
+    def __init__(self,input_dim=1024, hidden_dim=1024, output_dim=1): #input_dim= input dim at each time step = emb_size
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.hidden_layers = hidden_layers
-        self.upw = Variable(torch.rand((1, X.shape[0]*X.shape[1]*X.shape[2], 1)), requires_grad=True)   #incomplete
-        self.GRU = nn.GRU(input_dim, hidden_dim/2 , hidden_layers, batch_first=True, dropout=keep_prob, bidirectional=True)
-        self.fc = nn.Linear(hidden_dim, output_dim)
+        self.upw = nn.Linear(hidden_dim,output_dim)  #1024x1
+        self.fc = nn.Linear(hidden_dim, hidden_dim) 
         self.tanh = nn.Tanh()
+        self.softmax=nn.Softmax(dim=1)
 
-    def forward(self, X):
+    def forward(self, X):  # padded elmo embed
         x1, x2 = (X.shape[0]*X.shape[1]*X.shape[2], X.shape[3])   #(4*10*50, 1024)
-        X = X.unsqueeze(0)                                     #(1, 4*10*50, 1024)
-        out, h = self.GRU(X)
-        upkji = self.tanh(self.fc(out))                    #u(p)(kji) = (1, 2000, 1024)
-        # --------------line 65------
-        num = torch.exp(self.upw*upkji)
-        denom = torch.sum(torch.exp(self.upw*upkji), dim=1)
-        alpha = num / denom
-        first_level_attention = torch.sum(alpha*out, dim=1)        #(1,1024)
+        X = X.view(1,x1,-1)                                 #(1, 4*10*50, 1024)
+        out = X
+        upkji = self.tanh(self.fc(out))            #(bs,2000,1024)                       
+        alpha = self.softmax(self.upw(upkji))   #(bs,2000,1)
+        first_level_attention = torch.sum(alpha*out, dim=1,keepdim=True)        #(bs,1,1024)
         return first_level_attention
 
 class SentEncoder(nn.Module):
-
-    def __init__(self, input_dim=1024, hidden_dim=1024, hidden_layers=2, output_dim=1024, keep_prob=0.2, X):
+    def __init__(self,input_dim=1024, hidden_dim=1024, hidden_layers=2, output_dim=1, keep_prob=0.2):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.hidden_layers = hidden_layers
-        self.GRU = nn.GRU(input_dim, hidden_dim, hidden_layers, batch_first=True, dropout=keep_prob, bidirectional=True)
-        self.ups = Variable(torch.rand((X.shape[0]*X.shape[1], X.shape[2], 1)), requires_grad=True)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-        self.second_level_attention = WordEncoder(X)  ###lookout
+        self.GRU = nn.GRU(input_dim,int(hidden_dim/2), hidden_layers, batch_first=True, dropout=keep_prob, bidirectional=True)
+        self.upw = nn.Linear(hidden_dim,output_dim)
+        self.ups = nn.Linear(hidden_dim,output_dim)
+        self.fc = nn.Linear(hidden_dim, hidden_dim)
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim) 
         self.tanh = nn.Tanh()
+        self.softmax=nn.Softmax(dim=1)
 
     def forward(self, X):
-        x1, x2, x3 = (X.shape[0]*X.shape[1], X.shape[2], X.shape[3])
+        x1, x2, x3 = (X.shape[0]*X.shape[1], X.shape[2], X.shape[3])   # (4*10,50,1024)
         X = X.view(x1, x2, x3)
-        out, h = self.GRU(X)
-        upkj = self.tanh(self.fc(out))  # u(p)(kj) = (40,50,1024)
-        num = torch.exp(self.upw * upkj)
-        denom = torch.sum(torch.exp(self.upw * upkj), dim=1)
-        alpha = num / denom
-        first_level_attention = torch.sum(alpha*out, dim=1)                                              #(40,1024)
-        first_level_attention = first_level_attention.unsqueeze(0)                                   #(1,40,1024)
-        second_level_attention = self.second_level_attention(first_level_attention) #(1,1024)
+        out = X
+        upkj = self.tanh(self.fc(out))  # u(p)(kj) = (bs,40,50,1024)
+        alpha=self.softmax(self.upw(upkj))
+        first_level_attention = torch.sum(alpha*out, dim=-2).unsqueeze(0)                          #(bs,40,1024)      
+        out,_=self.GRU(first_level_attention)
+        upk=self.tanh(self.fc1(out))
+        alpha=self.softmax(self.ups(upk))
+        second_level_attention=torch.sum(alpha*out,dim=-2)       
         return second_level_attention
 
 class ParaEncoder(nn.Module):
-
-    def __init__(self, input_dim=1024, hidden_dim=1024, hidden_layers=2, output_dim=1024, keep_prob=0.2, X):
+    def __init__(self, input_dim=1024, hidden_dim=1024, hidden_layers=2, output_dim=1, keep_prob=0.2):
         super().__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
         self.hidden_layers = hidden_layers
-        self.GRU = nn.GRU(input_dim, hidden_dim/2, hidden_layers, batch_first=True, dropout=keep_prob, bidirectional=True)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-        self.tanh = nn.Tanh()
-        self.upp = Variable(torch.rand((X.shape[1], X.shape[2], 1)), requires_grad=True)   #change
-        self.third_level_output = WordEncoder(X)
-        self.second_level_output = SentEncoder(X)
-
-    def forward(self, X):
-        x1, x2, x3, x4 = (X.shape[0], X.shape[1], X.shape[2], X.shape[3])
-        first_level_output = torch.zeros(x1,x2,x4)    #(4,10,1024)
-        for i in range(x1):  #for p-paragraphs
-            out, h = self.GRU(X[i])                 #out = (10,50,1024)
-            upk = self.tanh(self.fc(out))
-            num = torch.exp(self.upp*upk)
-            denom = torch.sum(torch.exp(self.upw * upk), dim=1)
-            alpha = num / denom
-            first_level_attention = torch.sum(alpha * out, dim=1)  # (10,1024)
-            first_level_output[i] = first_level_attention
-        #first_level_output = (4,10,1024)
-        second_level_output = self.second_level_output(first_level_output)  #(4,1024)
-        second_level_output = second_level_output.view(1,x1,x4)  #(1,4,1024)
-        third_level_output = self.third_level_output(second_level_output)  #(1,1024)
+        self.GRU_Sent = nn.GRU(input_dim, int(hidden_dim/2), hidden_layers, batch_first=True, dropout=keep_prob, bidirectional=True)
+        self.GRU_para = nn.GRU(input_dim, int(hidden_dim/2), hidden_layers, batch_first=True, dropout=keep_prob, bidirectional=True)
+        self.FC1=nn.Sequential(nn.Linear(hidden_dim,hidden_dim),nn.Tanh(),nn.Linear(hidden_dim,output_dim),nn.Softmax(dim=-2))
+        self.FC2=nn.Sequential(nn.Linear(hidden_dim,hidden_dim),nn.Tanh(),nn.Linear(hidden_dim,output_dim),nn.Softmax(dim=-2))
+        self.FC3=nn.Sequential(nn.Linear(hidden_dim,hidden_dim),nn.Tanh(),nn.Linear(hidden_dim,output_dim),nn.Softmax(dim=-2))
+    def forward(self, X): #(4,10,50,1024)
+        out=X #(4,10,50,1024)
+        alpha_word=self.FC1(out)
+        first_level_attention=torch.sum(alpha_word*out,dim=-2)
+        first_level_attention,_=self.GRU_Sent(first_level_attention)
+        alpha_sent=self.FC2(first_level_attention)
+        second_level_attention=torch.sum(alpha_sent*first_level_attention,dim=-2).unsqueeze(0)
+        second_level_attention,_=self.GRU_para(second_level_attention)
+        alpha_para=self.FC3(second_level_attention)
+        third_level_output=torch.sum(alpha_para*second_level_attention,dim=-2)
         return third_level_output
-
 
 class MashRNN(nn.Module):
 
