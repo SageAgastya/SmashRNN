@@ -40,11 +40,11 @@ class Pad():  #pads words as well as sentences
             li.append(self.dummy)
         paralen = [len(para) for para in input]
         seqlen = [[len(line.split()) for line in para] for para in input]
-        self.embed = self.embed(input)
+        self.embedd = self.embed(input)
         for i in range(len(seqlen)):
             m = 0
             for k in seqlen[i]:
-                self.zeros[i][m][:k] = self.embed[i][m][:k]
+                self.zeros[i][m][:k] = self.embedd[i][m][:k]
                 m += 1
 
         alpha = self.zeros[:, :-1]
